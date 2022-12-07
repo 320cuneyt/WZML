@@ -13,14 +13,8 @@ from html import escape
 from threading import Thread
 from telegram import ParseMode, InlineKeyboardButton
 
-from bot import NAME_FONT, bot, Interval, INDEX_URL, BUTTON_FOUR_NAME, BUTTON_FOUR_URL, BUTTON_FIVE_NAME, BUTTON_FIVE_URL, \
-                BUTTON_SIX_NAME, BUTTON_SIX_URL, VIEW_LINK, aria2, dispatcher, DOWNLOAD_DIR, \
-                download_dict, download_dict_lock, TG_SPLIT_SIZE, LOGGER, DB_URI, INCOMPLETE_TASK_NOTIFIER, \
-                LEECH_LOG, BOT_PM, MIRROR_LOGS, SOURCE_LINK, AUTO_DELETE_UPLOAD_MESSAGE_DURATION, \
-                MIRROR_ENABLED, LEECH_ENABLED, WATCH_ENABLED, CLONE_ENABLED, LINK_LOGS, EMOJI_THEME, \
-                MIRROR_LOG_URL, LEECH_LOG_URL, TITLE_NAME, LEECH_LOG_INDEXING, PICS, NAME_FONT, FORCE_BOT_PM, DISABLE_DRIVE_LINK, \
-                PRE_DICT, REM_DICT, SUF_DICT
-from bot.helper.ext_utils.bot_utils import is_url, is_magnet, is_gdtot_link, is_mega_link, is_gdrive_link, get_content_type, get_readable_time
+from bot import *
+from bot.helper.ext_utils.bot_utils import is_url, is_magnet, is_gdtot_link, is_mega_link, is_gdrive_link, get_content_type, get_readable_time, change_filename
 from bot.helper.ext_utils.fs_utils import get_base_name, get_path_size, split_file, clean_download, clean_target
 from bot.helper.ext_utils.exceptions import DirectDownloadLinkException, NotSupportedExtractionArchive
 from bot.helper.mirror_utils.status_utils.extract_status import ExtractStatus
@@ -54,20 +48,21 @@ class MirrorLeechListener:
         self.select = select
         self.isPrivate = message.chat.type in ['private', 'group']
         self.suproc = None
-        self.user_id = self.message.from_user.id	
-        reply_to = self.message.reply_to_message
+        self.user_id = self.message.from_user.id
+        self.reply_to = self.message.reply_to_message
 
     def clean(self):
         try:
-            Interval[0].cancel()
-            Interval.clear()
+            with status_reply_dict_lock:
+                Interval[0].cancel()
+                Interval.clear()
             aria2.purge()
             delete_all_messages()
         except:
             pass
 
     def onDownloadStart(self):
-        if not self.isPrivate and INCOMPLETE_TASK_NOTIFIER and DB_URI is not None:
+        if not self.isPrivate and config_dict['INCOMPLETE_TASK_NOTIFIER'] and DATABASE_URL:
             DbManger().add_incomplete_task(self.message.chat.id, self.message.link, self.tag)
 
     def onDownloadComplete(self):
@@ -77,7 +72,7 @@ class MirrorLeechListener:
             gid = download.gid()
         LOGGER.info(f"Download completed: {name}")
         if name == "None" or self.isQbit or not ospath.exists(f"{self.dir}/{name}"):
-            name = listdir(f"{self.dir}")[-1]
+            name = listdir(self.dir)[-1]
         m_path = f'{self.dir}/{name}'
         size = get_path_size(m_path)
         if self.isZip:
@@ -88,6 +83,7 @@ class MirrorLeechListener:
                 path = f"{m_path}.zip"
             with download_dict_lock:
                 download_dict[self.uid] = ZipStatus(name, size, gid, self)
+            TG_SPLIT_SIZE = config_dict['TG_SPLIT_SIZE']
             if self.pswd is not None:
                 if self.isLeech and int(size) > TG_SPLIT_SIZE:
                     LOGGER.info(f'Zip: orig_path: {m_path}, zip_path: {path}.0*')
@@ -179,6 +175,7 @@ class MirrorLeechListener:
             o_files = []
             if not self.isZip:
                 checked = False
+                TG_SPLIT_SIZE = config_dict['TG_SPLIT_SIZE']
                 for dirpath, subdir, files in walk(up_dir, topdown=False):
                     for file_ in files:
                         f_path = ospath.join(dirpath, file_)
@@ -193,19 +190,18 @@ class MirrorLeechListener:
                             if not res:
                                 return
                             if res == "errored":
-                                if f_size <= TG_SPLIT_SIZE:
+                                if f_size <= tgBotMaxFileSize:
                                     continue
-                                else:
-                                    try:
-                                        osremove(f_path)
-                                    except:
-                                        return
+                                try:
+                                    osremove(f_path)
+                                except:
+                                    return
                             elif not self.seed or self.newDir:
                                 try:
                                     osremove(f_path)
                                 except:
                                     return
-                            elif self.seed and res != "errored":
+                            else:
                                 m_size.append(f_size)
                                 o_files.append(file_)
 
@@ -228,53 +224,20 @@ class MirrorLeechListener:
             with download_dict_lock:
                 download_dict[self.uid] = upload_status
             update_all_messages()
-            drive.upload(up_name)
+            drive.upload(up_name, self.user_id)
+
 
     def onUploadComplete(self, link: str, size, files, folders, typ, name):
         buttons = ButtonMaker()
         mesg = self.message.text.split('\n')
         message_args = mesg[0].split(' ', maxsplit=1)
         reply_to = self.message.reply_to_message
-        PREFIX = PRE_DICT.get(self.message.from_user.id, "")
-        REMNAME = REM_DICT.get(self.message.from_user.id, "")
-        SUFFIX = SUF_DICT.get(self.message.from_user.id, "")
+        user_id_ = self.message.from_user.id
         file_ = escape(name)
+        up_path, file_, _ = change_filename(file_, user_id_, all_edit=False)
 
-        #MysteryStyle ~ Tele-LeechX
-        if file_.startswith('www'):
-            file_ = ' '.join(file_.split()[1:])
-        if REMNAME:
-            if not REMNAME.startswith('|'):
-                REMNAME = f"|{REMNAME}"
-            slit = REMNAME.split("|")
-            __newFileName = file_
-            for rep in range(1, len(slit)):
-                args = slit[rep].split(":")
-                if len(args) == 3:
-                    __newFileName = __newFileName.replace(args[0], args[1], int(args[2]))
-                elif len(args) == 2:
-                    __newFileName = __newFileName.replace(args[0], args[1])
-                elif len(args) == 1:
-                    __newFileName = __newFileName.replace(args[0], '')
-            file_ = __newFileName
-            LOGGER.info("Remname : "+file_)
-        if PREFIX:
-            if not file_.startswith(PREFIX):
-                file_ = f"{PREFIX}{file_}"
-        if SUFFIX:
-            sufLen = len(SUFFIX)
-            fileDict = file_.split('.')
-            _extIn = 1 + len(fileDict[-1])
-            _extOutName = '.'.join(fileDict[:-1]).replace('.', ' ').replace('-', ' ')
-            _newExtFileName = f"{_extOutName}{SUFFIX}.{fileDict[-1]}"
-            if len(_extOutName) > (64 - (sufLen + _extIn)):
-                _newExtFileName = (
-                    _extOutName[: 64 - (sufLen + _extIn)]
-                    + f"{SUFFIX}.{fileDict[-1]}"
-                            )
-            file_ = _newExtFileName
-
-        if EMOJI_THEME is True:
+        NAME_FONT = config_dict['NAME_FONT']
+        if config_dict['EMOJI_THEME']:
             slmsg = f"🗂️ Name: <{NAME_FONT}>{file_}</{NAME_FONT}>\n\n"
             slmsg += f"📐 Size: {size}\n"
             slmsg += f"👥 Added by: {self.tag} | <code>{self.user_id}</code>\n\n"
@@ -282,12 +245,12 @@ class MirrorLeechListener:
             slmsg = f"Name: <{NAME_FONT}>{file_}</{NAME_FONT}>\n\n"
             slmsg += f"Size: {size}\n"
             slmsg += f"Added by: {self.tag} | <code>{self.user_id}</code>\n\n"
-        if LINK_LOGS:
+        if 'link_logs' in user_data:
             try:
                 upper = f"‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒\n"
                 source_link = f"<code>{message_args[1]}</code>\n"
                 lower = f"‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒\n"
-                for link_log in LINK_LOGS:
+                for link_log in user_data['link_logs']:
                     bot.sendMessage(link_log, text=slmsg + upper + source_link + lower, parse_mode=ParseMode.HTML )
             except IndexError:
                 pass
@@ -298,10 +261,11 @@ class MirrorLeechListener:
                         upper = f"‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒\n"
                         source_link = f"<code>{reply_text.strip()}</code>\n"
                         lower = f"‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒‒\n"
-                        for link_log in LINK_LOGS:
+                        for link_log in user_data['link_logs']:
                             bot.sendMessage(chat_id=link_log, text=slmsg + upper + source_link + lower, parse_mode=ParseMode.HTML )
                 except TypeError:
                     pass
+        AUTO_DELETE_UPLOAD_MESSAGE_DURATION = config_dict['AUTO_DELETE_UPLOAD_MESSAGE_DURATION']
         if AUTO_DELETE_UPLOAD_MESSAGE_DURATION != -1:
             reply_to = self.message.reply_to_message
             if reply_to is not None:
@@ -310,14 +274,14 @@ class MirrorLeechListener:
             if self.message.chat.type == 'private':
                 warnmsg = ''
             else:
-                if EMOJI_THEME is True:
+                if config_dict['EMOJI_THEME']:
                     warnmsg = f'<b>❗ This message will be deleted in <i>{auto_delete_message} minutes</i> from this group.</b>\n'
                 else:
                     warnmsg = f'<b>This message will be deleted in <i>{auto_delete_message} minutes</i> from this group.</b>\n'
         else:
             warnmsg = ''
-        if BOT_PM and self.message.chat.type != 'private':
-            if EMOJI_THEME is True:
+        if config_dict['BOT_PM'] and self.message.chat.type != 'private':
+            if config_dict['EMOJI_THEME']:
                 pmwarn = f"<b>😉 I have sent files in PM.</b>\n"
             else:
                 pmwarn = f"<b>I have sent files in PM.</b>\n"
@@ -325,33 +289,33 @@ class MirrorLeechListener:
             pmwarn = ''
         else:
             pmwarn = ''
-        if MIRROR_LOGS and self.message.chat.type != 'private':
-            if EMOJI_THEME is True:
-                logwarn = f"<b>⚠️ I have sent files in Mirror Log Channel. Join <a href=\"{MIRROR_LOG_URL}\">Mirror Log channel</a> </b>\n"
+        if 'mirror_logs' in user_data and self.message.chat.type != 'private':
+            if config_dict['EMOJI_THEME']:
+                logwarn = f"<b>⚠️ I have sent files in Mirror Log Channel. Join <a href=\"{config_dict['MIRROR_LOG_URL']}\">Mirror Log channel</a> </b>\n"
             else:
-                logwarn = f"<b>I have sent files in Mirror Log Channel. Join <a href=\"{MIRROR_LOG_URL}\">Mirror Log channel</a> </b>\n"
+                logwarn = f"<b>I have sent files in Mirror Log Channel. Join <a href=\"{config_dict['MIRROR_LOG_URL']}\">Mirror Log channel</a> </b>\n"
         elif self.message.chat.type == 'private':
             logwarn = ''
         else:
             logwarn = ''
-        if LEECH_LOG and self.message.chat.type != 'private':
-            if EMOJI_THEME is True:
-                logleechwarn = f"<b>⚠️ I have sent files in Leech Log Channel. Join <a href=\"{LEECH_LOG_URL}\">Leech Log channel</a> </b>\n"
+        if 'is_leech_log' in user_data and self.message.chat.type != 'private':
+            if config_dict['EMOJI_THEME']:
+                logleechwarn = f"<b>⚠️ I have sent files in Leech Log Channel. Join <a href=\"{config_dict['LEECH_LOG_URL']}\">Leech Log channel</a> </b>\n"
             else:
-                logleechwarn = f"<b>I have sent files in Leech Log Channel. Join <a href=\"{LEECH_LOG_URL}\">Leech Log channel</a> </b>\n"
+                logleechwarn = f"<b>I have sent files in Leech Log Channel. Join <a href=\"{config_dict['LEECH_LOG_URL']}\">Leech Log channel</a> </b>\n"
         elif self.message.chat.type == 'private':
             logleechwarn = ''
         else:
             logleechwarn = ''
-        if not self.isPrivate and INCOMPLETE_TASK_NOTIFIER and DB_URI is not None:
+        if not self.isPrivate and config_dict['INCOMPLETE_TASK_NOTIFIER'] and DATABASE_URL is not None:
             DbManger().rm_complete_task(self.message.link)
 
 
-        if BOT_PM and FORCE_BOT_PM and not self.isPrivate:
-            if EMOJI_THEME is True:
-                msg = f"<b>🗂️ Name: </b><{NAME_FONT}>{file_}</{NAME_FONT}>\n"
+        if config_dict['BOT_PM'] and config_dict['FORCE_BOT_PM'] and not self.isPrivate:
+            if config_dict['EMOJI_THEME']:
+                msg = f"<b>🗂️ Name: </b><{config_dict['NAME_FONT']}>{file_}</{config_dict['NAME_FONT']}>\n"
             else:
-                msg = f"<b>Name: </b><{NAME_FONT}>{file_}</{NAME_FONT}>\n"
+                msg = f"<b>Name: </b><{config_dict['NAME_FONT']}>{file_}</{config_dict['NAME_FONT']}>\n"
             botpm = f"<b>\nHey {self.tag}!, I have sent your stuff in PM.</b>\n"
             buttons = ButtonMaker()
             b_uname = bot.get_me().username
@@ -371,22 +335,21 @@ class MirrorLeechListener:
             if reply_to is not None and AUTO_DELETE_UPLOAD_MESSAGE_DURATION == -1:
                 reply_to.delete()
 
-        if EMOJI_THEME is True:
-            msg = f"<b>╭🗂️ Name: </b><{NAME_FONT}>{file_}</{NAME_FONT}>\n<b>├📐 Size: </b>{size}"
+        if config_dict['EMOJI_THEME']:
+            msg = f"<b>╭🗂️ Name: </b><{config_dict['NAME_FONT']}>{file_}</{config_dict['NAME_FONT']}>\n<b>├📐 Size: </b>{size}"
         else:
-            msg = f"<b>╭ Name: </b><{NAME_FONT}>{file_}</{NAME_FONT}>\n<b>├ Size: </b>{size}"
-
+            msg = f"<b>╭ Name: </b><{config_dict['NAME_FONT']}>{file_}</{config_dict['NAME_FONT']}>\n<b>├ Size: </b>{size}"
 
         if self.isLeech:
-            if SOURCE_LINK is True:
+            if config_dict['SOURCE_LINK']:
                 try:
                     mesg = message_args[1]
                     if is_magnet(mesg):
                         link = telegraph.create_page(
-                            title=f"{TITLE_NAME} Source Link",
+                            title=f"{config_dict['TITLE_NAME']} Source Link",
                             content=mesg,
                         )["path"]
-                        buttons.buildbutton(f"🔗 Source Link", f"https://graph.org/{link}")
+                        buttons.buildbutton(f"🔗 Source Link", f"https://telegra.ph/{link}")
                     elif is_url(mesg):
                         source_link = mesg
                         if source_link.startswith(("|", "pswd: ")):
@@ -404,36 +367,36 @@ class MirrorLeechListener:
                             source_link = reply_text.strip()
                             if is_magnet(source_link):
                                 link = telegraph.create_page(
-                                    title=f"{TITLE_NAME} Source Link",
+                                    title=f"{config_dict['TITLE_NAME']} Source Link",
                                     content=source_link,
                                 )["path"]
-                                buttons.buildbutton(f"🔗 Source Link", f"https://graph.org/{link}")
+                                buttons.buildbutton(f"🔗 Source Link", f"https://telegra.ph/{link}")
                             else:
                                 buttons.buildbutton(f"🔗 Source Link", source_link)
                     except Exception:
                         pass
             else:
                 pass
-            if BOT_PM is True and FORCE_BOT_PM is False and self.message.chat.type != 'private':	
-                bot_d = bot.get_me()	
-                b_uname = bot_d.username	
-                botstart = f"http://t.me/{b_uname}"	
+            if config_dict['BOT_PM'] and not config_dict['FORCE_BOT_PM'] and self.message.chat.type != 'private':
+                bot_d = bot.get_me()
+                b_uname = bot_d.username
+                botstart = f"http://t.me/{b_uname}"
                 buttons.buildbutton("View file in PM", f"{botstart}")
             elif self.message.chat.type == 'private':
                 botstart = ''
             else:
                 botstart = ''
 
-            if EMOJI_THEME is True:
+            if config_dict['EMOJI_THEME']:
                 msg += f'\n<b>├📚 Total Files: </b>{folders}'
             else:
                 msg += f'\n<b>├ Total Files: </b>{folders}'
             if typ != 0:
-                if EMOJI_THEME is True:
+                if config_dict['EMOJI_THEME']:
                     msg += f'\n<b>├💀 Corrupted Files: </b>{typ}'
                 else:
                     msg += f'\n<b>├ Corrupted Files: </b>{typ}'
-            if EMOJI_THEME is True:
+            if config_dict['EMOJI_THEME']:
                 msg += f'\n<b>├⌛ It Tooks:</b> {get_readable_time(time() - self.message.date.timestamp())}'
                 msg += f'\n<b>╰👤 #Leech_by: </b>{self.tag}\n\n'
             else: 
@@ -453,7 +416,7 @@ class MirrorLeechListener:
                     fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
                     if len(fmsg.encode() + msg.encode()) > 2000:
                         sleep(1.5)
-                        if FORCE_BOT_PM is False:
+                        if not config_dict['FORCE_BOT_PM']:
                             if PICS:
                                 uploadmsg = sendPhoto(msg + fmsg + pmwarn + logleechwarn + warnmsg, self.bot, self.message, choice(PICS), buttons.build_menu(2))
                             else:
@@ -462,14 +425,14 @@ class MirrorLeechListener:
                         fmsg = ''
                 if fmsg != '':
                     sleep(1.5)
-                    if FORCE_BOT_PM is False:
+                    if not config_dict['FORCE_BOT_PM']:
                         if PICS:
                             uploadmsg = sendPhoto(msg + fmsg + pmwarn + logleechwarn + warnmsg, self.bot, self.message, choice(PICS), buttons.build_menu(2))
                         else:
                             uploadmsg = sendMarkup(msg + fmsg + pmwarn + logleechwarn + warnmsg, self.bot, self.message, buttons.build_menu(2))
                         Thread(target=auto_delete_upload_message, args=(bot, self.message, uploadmsg)).start()
-                if LEECH_LOG_INDEXING is True:
-                    for i in LEECH_LOG:
+                if config_dict['LEECH_LOG_INDEXING']:
+                    for i in user_data['is_leech_log']:
                         indexmsg = ''
                         for index, (link, name) in enumerate(files.items(), start=1):
                             indexmsg += f"{index}. <a href='{link}'>{name}</a>\n"
@@ -487,20 +450,21 @@ class MirrorLeechListener:
             if self.seed:
                 if self.newDir:
                     clean_target(self.newDir)
-                return			   			  
+                return     
+
         else:
-            if EMOJI_THEME is True:
+            if config_dict['EMOJI_THEME']:
                 msg += f'\n<b>├📦 Type: </b>{typ}'
             else:
                 msg += f'\n<b>├ Type: </b>{typ}'
             if typ == "Folder":
-                if EMOJI_THEME is True:
+                if config_dict['EMOJI_THEME']:
                     msg += f'\n<b>├🗃️ SubFolders: </b>{folders}'
                     msg += f'\n<b>├🗂️ Files: </b>{files}'
                 else:
                     msg += f'\n<b>├ SubFolders: </b>{folders}'
                     msg += f'\n<b>├ Files: </b>{files}'
-            if EMOJI_THEME is True:
+            if config_dict['EMOJI_THEME']:
                 msg += f'\n<b>├⌛ It Tooks:</b> {get_readable_time(time() - self.message.date.timestamp())}'
                 msg += f'\n<b>╰👤 #Mirror_By: </b>{self.tag}\n\n'
             else:
@@ -508,13 +472,13 @@ class MirrorLeechListener:
                 msg += f'\n<b>╰ #Mirror_By: </b>{self.tag}\n\n' 
             buttons = ButtonMaker()
             link = short_url(link)
-            if DISABLE_DRIVE_LINK is True and self.message.chat.type != 'private':
+            if config_dict['DISABLE_DRIVE_LINK'] and self.message.chat.type != 'private':
                 pass
             else:
                 buttons.buildbutton("☁️ Drive Link", link)
-            LOGGER.info(f'Done Uploading {name}')
-            if INDEX_URL is not None:
-                url_path = rutils.quote(f'{name}')
+            LOGGER.info(f'Done Uploading {file_}')
+            if INDEX_URL:= config_dict['INDEX_URL']:
+                url_path = rutils.quote(f'{file_}')
                 share_url = f'{INDEX_URL}/{url_path}'
                 if typ == "Folder":
                     share_url += '/'
@@ -523,19 +487,19 @@ class MirrorLeechListener:
                 else:
                     share_url = short_url(share_url)
                     buttons.buildbutton("⚡ Index Link", share_url)
-                    if VIEW_LINK:
+                    if config_dict['VIEW_LINK']:
                         share_urls = f'{INDEX_URL}/{url_path}?a=view'
                         share_urls = short_url(share_urls)
                         buttons.buildbutton("🌐 View Link", share_urls)
-                    if SOURCE_LINK is True:
+                    if config_dict['SOURCE_LINK']:
                         try:
                             mesg = message_args[1]
                             if is_magnet(mesg):
                                 link = telegraph.create_page(
-                                    title=f"{TITLE_NAME} Source Link",
+                                    title=f"{config_dict['TITLE_NAME']} Source Link",
                                     content=mesg,
                                 )["path"]
-                                buttons.buildbutton(f"🔗 Source Link", f"https://graph.org/{link}")
+                                buttons.buildbutton(f"🔗 Source Link", f"https://telegra.ph/{link}")
                             elif is_url(mesg):
                                 source_link = mesg
                                 if source_link.startswith(("|", "pswd: ")):
@@ -553,10 +517,10 @@ class MirrorLeechListener:
                                     source_link = reply_text.strip()
                                     if is_magnet(source_link):
                                         link = telegraph.create_page(
-                                            title=f"{TITLE_NAME} Source Link",
+                                            title=f"{config_dict['TITLE_NAME']} Source Link",
                                             content=source_link,
                                         )["path"]
-                                        buttons.buildbutton(f"🔗 Source Link", f"https://graph.org/{link}")
+                                        buttons.buildbutton(f"🔗 Source Link", f"https://telegra.ph/{link}")
                                     else:
                                         buttons.buildbutton(f"🔗 Source Link", source_link)
                             except Exception:
@@ -565,45 +529,45 @@ class MirrorLeechListener:
                         pass
                     
 
-                    if BOT_PM is True and FORCE_BOT_PM is False and self.message.chat.type != 'private':	
-                        bot_d = bot.get_me()	
-                        b_uname = bot_d.username	
-                        botstart = f"http://t.me/{b_uname}"	
+                    if config_dict['BOT_PM'] and not config_dict['FORCE_BOT_PM'] and self.message.chat.type != 'private':
+                        bot_d = bot.get_me()
+                        b_uname = bot_d.username
+                        botstart = f"http://t.me/{b_uname}"
                         buttons.buildbutton("View file in PM", f"{botstart}")
                     elif self.message.chat.type == 'private':
                         botstart = ''
                     else:
                         botstart = ''
 
-            if BUTTON_FOUR_NAME is not None and BUTTON_FOUR_URL is not None:
-                buttons.buildbutton(f"{BUTTON_FOUR_NAME}", f"{BUTTON_FOUR_URL}")
-            if BUTTON_FIVE_NAME is not None and BUTTON_FIVE_URL is not None:
-                buttons.buildbutton(f"{BUTTON_FIVE_NAME}", f"{BUTTON_FIVE_URL}")
-            if BUTTON_SIX_NAME is not None and BUTTON_SIX_URL is not None:
-                buttons.buildbutton(f"{BUTTON_SIX_NAME}", f"{BUTTON_SIX_URL}")
+            if config_dict['BUTTON_FOUR_NAME'] != '' and config_dict['BUTTON_FOUR_URL'] != '':
+                buttons.buildbutton(f"{config_dict['BUTTON_FOUR_NAME']}", f"{config_dict['BUTTON_FOUR_URL']}")
+            if config_dict['BUTTON_FIVE_NAME'] != '' and config_dict['BUTTON_FIVE_URL'] != '':
+                buttons.buildbutton(f"{config_dict['BUTTON_FIVE_NAME']}", f"{config_dict['BUTTON_FIVE_URL']}")
+            if config_dict['BUTTON_SIX_NAME'] != '' and config_dict['BUTTON_SIX_URL'] != '':
+                buttons.buildbutton(f"{config_dict['BUTTON_SIX_NAME']}", f"{config_dict['BUTTON_SIX_URL']}")
 
-            if FORCE_BOT_PM is False or self.message.chat.type == 'private':
+            if not config_dict['FORCE_BOT_PM'] or self.message.chat.type == 'private':
                 if PICS:
                     uploadmsg = sendPhoto(msg + pmwarn + logwarn + warnmsg, self.bot, self.message, choice(PICS), buttons.build_menu(2))
                 else:
                     uploadmsg = sendMarkup(msg + pmwarn + logwarn + warnmsg, self.bot, self.message, buttons.build_menu(2))
                 Thread(target=auto_delete_upload_message, args=(bot, self.message, uploadmsg)).start()
             
-            if MIRROR_LOGS:	
-                try:	
-                    for chatid in MIRROR_LOGS:	
-                        bot.sendMessage(chat_id=chatid, text=msg,	
-                                        reply_markup=buttons.build_menu(2),	
-                                        parse_mode=ParseMode.HTML)	
-                except Exception as e:	
-                    LOGGER.warning(e)	
-            if BOT_PM and self.message.chat.type != 'private':	
-                try:	
-                    bot.sendMessage(chat_id=self.user_id, text=msg,	
-                                    reply_markup=buttons.build_menu(2),	
-                                    parse_mode=ParseMode.HTML)	
-                except Exception as e:	
-                    LOGGER.warning(e)	
+            if 'mirror_logs' in user_data:
+                try:
+                    for chatid in user_data['mirror_logs']:
+                        bot.sendMessage(chat_id=chatid, text=msg,
+                                        reply_markup=buttons.build_menu(2),
+                                        parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    LOGGER.warning(e)
+            if config_dict['BOT_PM'] and self.message.chat.type != 'private':
+                try:
+                    bot.sendMessage(chat_id=self.user_id, text=msg,
+                                    reply_markup=buttons.build_menu(2),
+                                    parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    LOGGER.warning(e)
                     return
             if self.seed:
                 if self.isZip:
@@ -626,8 +590,8 @@ class MirrorLeechListener:
     def onDownloadError(self, error):
         error = error.replace('<', ' ').replace('>', ' ')
         try:
-            if AUTO_DELETE_UPLOAD_MESSAGE_DURATION != -1 and reply_to is not None:
-                reply_to.delete()
+            if config_dict['AUTO_DELETE_UPLOAD_MESSAGE_DURATION'] != -1 and self.reply_to is not None:
+                self.reply_to.delete()
             else:
                 pass
         except Exception as e:
@@ -649,7 +613,7 @@ class MirrorLeechListener:
         else:
             update_all_messages()
 
-        if not self.isPrivate and INCOMPLETE_TASK_NOTIFIER and DB_URI is not None:
+        if not self.isPrivate and config_dict['INCOMPLETE_TASK_NOTIFIER'] and DATABASE_URL:
             DbManger().rm_complete_task(self.message.link)
 
     def onUploadError(self, error):
@@ -669,5 +633,4 @@ class MirrorLeechListener:
         else:
             update_all_messages()
 
-        if not self.isPrivate and INCOMPLETE_TASK_NOTIFIER and DB_URI is not None:
-            DbManger().rm_complete_task(self.message.link)
+        if not self.isPrivate and config_dict['INCOMPLETE_TASK_NOTIFIER'] and DATABASE_URL:            DbManger().rm_complete_task(self.message.link)

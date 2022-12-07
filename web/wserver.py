@@ -142,7 +142,7 @@ span{
 
 span.active{
     transform: rotate(90deg);
-    -ms-transform: rotate(90deg);	 /* for IE  */
+    -ms-transform: rotate(90deg); /* for IE  */
     -webkit-transform: rotate(90deg);/* for browsers supporting webkit (such as chrome, firefox, safari etc.). */
     display: inline-block;
 }
@@ -721,9 +721,8 @@ def list_torrent_contents(id_):
 def set_priority(id_):
 
     data = dict(request.form)
-
+    resume = ""
     if len(id_) > 20:
-        resume = ""
         pause = ""
 
         for i, value in data.items():
@@ -757,7 +756,6 @@ def set_priority(id_):
             LOGGER.error(f"Verification Failed! Hash: {id_}")
         client.auth_log_out()
     else:
-        resume = ""
         for i, value in data.items():
             if "filenode" in i and value == "on":
                 node_no = i.split("_")[-1]
